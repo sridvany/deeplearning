@@ -1,0 +1,200 @@
+import matplotlib.pyplot as plt
+import numpy as np
+import yfinance as yf
+import pandas as pd
+from datetime import datetime, timedelta
+from sklearn.preprocessing import MinMaxScaler
+from sklearn.metrics import mean_squared_error, mean_absolute_error, r2_score
+from tensorflow.keras.models import Sequential
+from tensorflow.keras.layers import LSTM, Dense, Dropout
+from tensorflow.keras.optimizers import Adam
+from tensorflow.keras.callbacks import EarlyStopping
+import os
+os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'
+
+
+pd.set_option('display.max_columns', None)
+pd.set_option('display.width', 1000)
+pd.set_option('display.expand_frame_repr', False)
+
+# Hisse senetleri sembollerini tanımla
+symbols = ["GARAN.IS"]
+
+# Tarih aralığını belirle
+end_date = datetime.now()
+start_date = end_date - timedelta(days=729)
+
+# Saatlik veriyi indir
+print("Hisse senetleri için saatlik veri alınıyor...")
+data = yf.download(symbols,
+                   start=start_date,
+                   end=end_date,
+                   interval="1h",
+                   auto_adjust= False) #Adjusted Close setini kullanma opsiyonu
+# Saatlik Close trend görseli
+plt.figure(figsize=(12, 6))
+plt.plot(pd.to_datetime(data.index), data['Close'], marker='o', linestyle='-')
+plt.xlabel('Tarih')
+plt.ylabel('Kapanış Fiyatı')
+plt.title('Saatlik Close Trend')
+plt.xticks(rotation=45)
+plt.grid(True)
+plt.tight_layout()
+plt.show()
+
+# Tarih formatını ayarla: Dakikaları 30, saniyeleri 0 yap
+data.index = data.index.map(lambda x: x.replace(minute=30, second=0))
+data.index = data.index.strftime('%Y-%m-%d %H:%M')
+
+print(f"\nVeri Boyutu: {data.shape}")
+print(f"Toplam veri noktası: {len(data)}")
+
+# Çoklu sembol verisi ise ilk sembolün verilerini seç
+if isinstance(data.columns, pd.MultiIndex):
+    symbol = symbols[0]
+    print(f"\nÇoklu sembol verisi algılandı. {symbol} verisi seçiliyor...")
+    data = data.xs(symbol, level=1, axis=1)
+
+# Eksik verileri temizle
+data = data.dropna()
+
+print("\nİlk 5 kayıt:")
+print(data.head())
+print("\nSon 5 kayıt:")
+print(data.tail())
+
+#Volume setini kullanma opsiyonu
+use_volume = True
+
+# Özellikler ve hedef değişkenin belirlenmesi (hedef: 'Close')
+features_cols = [col for col in data.columns if col != 'Close']
+
+# Volume'u çıkar (eğer use_volume False ise)
+if not use_volume and 'Volume' in features_cols:
+    features_cols.remove('Volume')
+    print("Volume özellik olarak çıkarıldı.")
+else:
+    print("Volume özellik olarak kullanılıyor.")
+
+data_features = data[features_cols].values
+data_target = data['Close'].values.reshape(-1, 1)
+
+print("\nKullanılacak Özellikler:", features_cols)
+print("Hedef Değişken: 'Close'")
+
+
+# Sliding window oluşturma fonksiyonu (X: geçmiş pencere, y: sonraki adımın hedef değeri)
+def create_sliding_window_xy(features, target, window_size):
+    X, y = [], []
+    for i in range(len(features) - window_size):
+        X.append(features[i:i + window_size, :])
+        y.append(target[i + window_size, 0])
+    return np.array(X), np.array(y)
+
+
+# Hiperparametreler
+hyperparams = {
+    'sliding_window': 10,
+    'batch_size': 64,
+    'learning_rate': 0.001,
+    'epochs': 300,
+    'dropout_rate': 0.15,
+    'units_dict': {1: 256, 2: 128, 3: 64, 4: 32, 5: 16}
+}
+
+window_size = hyperparams['sliding_window']
+X, y = create_sliding_window_xy(data_features, data_target, window_size)
+
+# Veriyi zamansal olarak böl
+total_samples = len(X)
+train_size = int(total_samples * 0.7)
+val_size = int(total_samples * 0.15)
+
+X_train = X[:train_size]
+y_train = y[:train_size]
+X_val = X[train_size:train_size + val_size]
+y_val = y[train_size:train_size + val_size]
+X_test = X[train_size + val_size:]
+y_test = y[train_size + val_size:]
+
+# MinMaxScaler uygulama (eğitim verisi üzerinden fit edilir)
+scaler_X = MinMaxScaler()
+scaler_y = MinMaxScaler()
+
+nsamples, window, nfeatures = X_train.shape
+X_train_reshaped = X_train.reshape(-1, nfeatures)
+X_train_scaled = scaler_X.fit_transform(X_train_reshaped).reshape(nsamples, window, nfeatures)
+
+X_val_reshaped = X_val.reshape(-1, nfeatures)
+X_val_scaled = scaler_X.transform(X_val_reshaped).reshape(X_val.shape[0], window, nfeatures)
+
+X_test_reshaped = X_test.reshape(-1, nfeatures)
+X_test_scaled = scaler_X.transform(X_test_reshaped).reshape(X_test.shape[0], window, nfeatures)
+
+y_train_scaled = scaler_y.fit_transform(y_train.reshape(-1, 1)).flatten()
+y_val_scaled = scaler_y.transform(y_val.reshape(-1, 1)).flatten()
+y_test_scaled = scaler_y.transform(y_test.reshape(-1, 1)).flatten()
+
+
+# LSTM modeli oluşturma fonksiyonu (num_layers: LSTM katman sayısı)
+def build_lstm_model(num_layers, input_shape, hyperparams):
+    dropout_rate = hyperparams['dropout_rate']
+    model = Sequential()
+    # İlk LSTM katmanı
+    first_units = hyperparams['units_dict'].get(1)
+    model.add(LSTM(units=first_units, return_sequences=(num_layers > 1), input_shape=input_shape))
+    model.add(Dropout(dropout_rate))
+    # Ek LSTM katmanları
+    for i in range(1, num_layers):
+        layer_units = hyperparams['units_dict'].get(i+1)
+        return_seq = (i < num_layers - 1)
+        model.add(LSTM(units=layer_units, return_sequences=return_seq))
+        model.add(Dropout(dropout_rate))
+    # Çıkış katmanı
+    model.add(Dense(1))
+    optimizer = Adam(learning_rate=hyperparams['learning_rate'])
+    model.compile(optimizer=optimizer, loss='mse')
+    return model
+
+
+# Model değerlendirme metriklerini hesaplama fonksiyonu
+def evaluate_model(y_true, y_pred):
+    rmse = np.sqrt(mean_squared_error(y_true, y_pred))
+    mae = mean_absolute_error(y_true, y_pred)
+    mape = np.mean(np.abs((y_true - y_pred) / y_true))
+    r2 = r2_score(y_true, y_pred)
+    return rmse, mae, mape, r2
+
+
+# Farklı katman sayılarına göre (1'den 5'e kadar) LSTM modellerini eğit ve değerlendir
+results = {}
+input_shape = (X_train_scaled.shape[1], X_train_scaled.shape[2])
+
+for num_layers in range(1, 6):
+    print(f"\n{num_layers} katmanlı LSTM modeli eğitiliyor...")
+    model = build_lstm_model(num_layers, input_shape, hyperparams)
+
+    early_stopping = EarlyStopping(monitor='val_loss', patience=5, restore_best_weights=True)
+    history = model.fit(X_train_scaled, y_train_scaled,
+                        validation_data=(X_val_scaled, y_val_scaled),
+                        epochs=hyperparams['epochs'],
+                        batch_size=hyperparams['batch_size'],
+                        callbacks=[early_stopping],
+                        verbose=0)
+
+    y_pred_scaled = model.predict(X_test_scaled)
+    y_pred = scaler_y.inverse_transform(y_pred_scaled).flatten()
+    y_test_inv = scaler_y.inverse_transform(y_test_scaled.reshape(-1, 1)).flatten()
+
+    rmse, mae, mape, r2 = evaluate_model(y_test_inv, y_pred)
+    results[f"{num_layers} katmanlı model"] = {
+        'rmse': rmse,
+        'mae': mae,
+        'mape': mape,
+        'r2': r2
+    }
+    print(f"Model Sonuçları - Katman: {num_layers} -> RMSE: {rmse:.4f}, MAE: {mae:.4f}, MAPE: {mape:.2f}%, R2: {r2:.4f}")
+
+results_df = pd.DataFrame(results).T
+print("\nTüm Model Sonuçları:")
+print(results_df)
