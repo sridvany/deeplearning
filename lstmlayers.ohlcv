@@ -12,9 +12,9 @@ from tensorflow.keras.callbacks import EarlyStopping
 import matplotlib.pyplot as plt
 
 
-# -----------------------------------------------------------
+
 # 1. Orijinal Veri Çekme, Temizleme ve Saklama İşlemleri
-# -----------------------------------------------------------
+
 def get_stock_data(stock_symbols, start_date, end_date):
     data_dict = {}
     for symbol in stock_symbols:
@@ -54,9 +54,9 @@ for symbol in stock_symbols:
     plt.show()
 
 
-# -----------------------------------------------------------
+
 # 2. Veri İşleme Fonksiyonları: Bölme, Özellik/Hedef Ayrımı, Sliding Window
-# -----------------------------------------------------------
+
 def train_val_test_split(data, train_ratio=0.8, val_ratio=0.10):
     n = len(data)
     train_end = int(n * train_ratio)
@@ -83,9 +83,9 @@ def split_features_target(df):
     return X, y
 
 
-# -----------------------------------------------------------
+
 # 3. Genel Hiperparametreler
-# -----------------------------------------------------------
+
 params = {
     'batch_size': 64,
     'epochs': 300,
@@ -95,9 +95,9 @@ params = {
     'use_early_stopping': True
 }
 
-# -----------------------------------------------------------
+
 # 4. LSTM Model Mimarisinin Konfigürasyonu (Katman sayısı, units ve dropout oranları)
-# -----------------------------------------------------------
+
 lstm_architectures = {
     1: {'units': [128], 'dropouts': [0.2]},
     2: {'units': [128, 64], 'dropouts': [0.2, 0.2]},
@@ -107,9 +107,9 @@ lstm_architectures = {
 }
 
 
-# -----------------------------------------------------------
+
 # 5. Modelin Dinamik Olarak Oluşturulması
-# -----------------------------------------------------------
+
 def build_model(input_shape, architecture, learning_rate):
     model = Sequential()
     model.add(Input(shape=input_shape))
@@ -127,9 +127,9 @@ def build_model(input_shape, architecture, learning_rate):
     return model
 
 
-# -----------------------------------------------------------
+
 # 6. Her Sembol için Veri Hazırlığı, Model Eğitimleri ve Değerlendirme
-# -----------------------------------------------------------
+
 results_list = []
 
 for symbol in stock_symbols:
