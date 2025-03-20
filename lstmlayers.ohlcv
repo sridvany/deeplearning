@@ -1,0 +1,228 @@
+import os
+import yfinance as yf
+import pandas as pd
+import numpy as np
+from sklearn.preprocessing import MinMaxScaler
+from sklearn.metrics import mean_squared_error, mean_absolute_error, mean_absolute_percentage_error, r2_score
+import tensorflow as tf
+from tensorflow.keras.models import Sequential
+from tensorflow.keras.layers import LSTM, Dropout, Dense, Input
+from tensorflow.keras.optimizers import Adam
+from tensorflow.keras.callbacks import EarlyStopping
+import matplotlib.pyplot as plt
+
+
+# -----------------------------------------------------------
+# 1. Orijinal Veri Çekme, Temizleme ve Saklama İşlemleri
+# -----------------------------------------------------------
+def get_stock_data(stock_symbols, start_date, end_date):
+    data_dict = {}
+    for symbol in stock_symbols:
+        print(f"Processing data for {symbol}")
+        stock_data = yf.download(f'{symbol}.IS', start=start_date, end=end_date)
+        print(stock_data.head())
+        zero_counts = (stock_data == 0).sum()
+        zero_counts_df = pd.DataFrame(zero_counts, columns=['Zero Value Count'])
+        print(zero_counts_df)
+        stock_data.replace(0, np.nan, inplace=True)
+        stock_data.dropna(inplace=True)
+        print(stock_data)
+        na_counts = stock_data.isna().sum()
+        na_counts_df = pd.DataFrame(na_counts, columns=['NA Value Count'])
+        print(na_counts_df)
+        data_dict[symbol] = stock_data.copy()
+    return data_dict
+
+
+stock_symbols = ['AKBNK','GARAN','YKBNK','ISCTR']
+start_date = '2008-01-01'
+end_date = '2022-01-01'
+stock_data_dict = get_stock_data(stock_symbols, start_date, end_date)
+for symbol in stock_symbols:
+    print(f"{symbol} veri adedi: {len(stock_data_dict[symbol])}")
+
+# Sembol bazında kapanış fiyatı trend grafiklerinin oluşturulması ve kaydedilmesi
+for symbol in stock_symbols:
+    df = stock_data_dict[symbol]
+    plt.figure(figsize=(10, 5))
+    plt.plot(df.index, df['Close'], label=f"{symbol} Kapanış")
+    plt.title(f"{symbol} Kapanış Fiyatı Trendi")
+    plt.xlabel("Tarih")
+    plt.ylabel("Kapanış Fiyatı")
+    plt.legend()
+    plt.grid(True)
+    plt.show()
+
+
+# -----------------------------------------------------------
+# 2. Veri İşleme Fonksiyonları: Bölme, Özellik/Hedef Ayrımı, Sliding Window
+# -----------------------------------------------------------
+def train_val_test_split(data, train_ratio=0.8, val_ratio=0.10):
+    n = len(data)
+    train_end = int(n * train_ratio)
+    val_end = train_end + int(n * val_ratio)
+    train = data.iloc[:train_end]
+    val = data.iloc[train_end:val_end]
+    test = data.iloc[val_end:]
+    return train, val, test
+
+
+def create_sequences(X, y, window_size):
+    Xs, ys = [], []
+    for i in range(len(X) - window_size):
+        Xs.append(X[i:i + window_size])
+        ys.append(y[i + window_size])
+    return np.array(Xs), np.array(ys)
+
+
+def split_features_target(df):
+    X = df.drop(['Close'], axis=1).values
+    y = df['Close'].values.reshape(-1, 1)
+    print("X (Bağımsız Değişkenler) Sütun İsimleri:", df.drop(['Close'], axis=1).columns.tolist())
+    print("y (Bağımlı Değişken) Sütun İsmi: ['Close']")
+    return X, y
+
+
+# -----------------------------------------------------------
+# 3. Genel Hiperparametreler
+# -----------------------------------------------------------
+params = {
+    'batch_size': 64,
+    'epochs': 300,
+    'learning_rate': 0.001,
+    'window_size': 60,
+    'patience': 10,
+    'use_early_stopping': True
+}
+
+# -----------------------------------------------------------
+# 4. LSTM Model Mimarisinin Konfigürasyonu (Katman sayısı, units ve dropout oranları)
+# -----------------------------------------------------------
+lstm_architectures = {
+    1: {'units': [128], 'dropouts': [0.2]},
+    2: {'units': [128, 64], 'dropouts': [0.2, 0.2]},
+    3: {'units': [128, 64, 32], 'dropouts': [0.2, 0.2, 0.2]},
+    4: {'units': [128, 64, 32, 16], 'dropouts': [0.2, 0.2, 0.2, 0.2]},
+    5: {'units': [128, 64, 32, 16, 8], 'dropouts': [0.2, 0.2, 0.2, 0.2, 0.2]}
+}
+
+
+# -----------------------------------------------------------
+# 5. Modelin Dinamik Olarak Oluşturulması
+# -----------------------------------------------------------
+def build_model(input_shape, architecture, learning_rate):
+    model = Sequential()
+    model.add(Input(shape=input_shape))
+    num_layers = len(architecture['units'])
+    for i in range(num_layers):
+        units = architecture['units'][i]
+        dropout_rate = architecture['dropouts'][i]
+        if i < num_layers - 1:
+            model.add(LSTM(units, return_sequences=True))
+        else:
+            model.add(LSTM(units))
+        model.add(Dropout(dropout_rate))
+    model.add(Dense(1))
+    model.compile(optimizer=Adam(learning_rate=learning_rate), loss='mse')
+    return model
+
+
+# -----------------------------------------------------------
+# 6. Her Sembol için Veri Hazırlığı, Model Eğitimleri ve Değerlendirme
+# -----------------------------------------------------------
+results_list = []
+
+for symbol in stock_symbols:
+    print(f"\n----- İşleniyor: {symbol} -----")
+    data = stock_data_dict[symbol]
+
+    # Veri setinin train, validation ve test olarak bölünmesi
+    train_df, val_df, test_df = train_val_test_split(data, train_ratio=0.7, val_ratio=0.15)
+
+    # Özellik ve hedef ayrımının yapılması
+    X_train, y_train = split_features_target(train_df)
+    X_val, y_val = split_features_target(val_df)
+    X_test, y_test = split_features_target(test_df)
+
+    # MinMax ölçekleme: Her sembol için ayrı scaler nesneleri kullanılarak
+    scaler_X = MinMaxScaler()
+    scaler_y = MinMaxScaler()
+
+    X_train_scaled = scaler_X.fit_transform(X_train)
+    X_val_scaled = scaler_X.transform(X_val)
+    X_test_scaled = scaler_X.transform(X_test)
+
+    y_train_scaled = scaler_y.fit_transform(y_train)
+    y_val_scaled = scaler_y.transform(y_val)
+    y_test_scaled = scaler_y.transform(y_test)
+
+    # Sliding window yöntemiyle sequence oluşturulması
+    window_size = params['window_size']
+    X_train_seq, y_train_seq = create_sequences(X_train_scaled, y_train_scaled, window_size)
+    X_val_seq, y_val_seq = create_sequences(X_val_scaled, y_val_scaled, window_size)
+    X_test_seq, y_test_seq = create_sequences(X_test_scaled, y_test_scaled, window_size)
+
+    # Her bir LSTM mimarisi için model oluştur, eğit, tahmin ve değerlendirme yap
+    for num_layers, arch_config in lstm_architectures.items():
+        print(f"\n{symbol} - {num_layers} Katmanlı LSTM Modeli")
+        input_shape = (window_size, X_train_seq.shape[2])
+        model = build_model(input_shape, arch_config, params['learning_rate'])
+
+        # Early stopping callback
+        callbacks = []
+        if params['use_early_stopping']:
+            early_stop = EarlyStopping(monitor='val_loss', patience=params['patience'], restore_best_weights=True)
+            callbacks.append(early_stop)
+
+        # Modelin eğitilmesi
+        history = model.fit(X_train_seq, y_train_seq,
+                            epochs=params['epochs'],
+                            batch_size=params['batch_size'],
+                            validation_data=(X_val_seq, y_val_seq),
+                            callbacks=callbacks,
+                            verbose=1)
+
+        # Test verisi üzerinde tahmin alınması
+        predictions_scaled = model.predict(X_test_seq)
+
+        # Ölçeklenmiş metriklerin hesaplanması
+        rmse_scaled = np.sqrt(mean_squared_error(y_test_seq, predictions_scaled))
+        mae_scaled = mean_absolute_error(y_test_seq, predictions_scaled)
+        mape_scaled = mean_absolute_percentage_error(y_test_seq, predictions_scaled)
+
+        # Orijinal ölçek için tahmin ve gerçek değerlerin elde edilmesi
+        predictions_original = scaler_y.inverse_transform(predictions_scaled)
+        y_test_original = scaler_y.inverse_transform(y_test_seq)
+
+        r2_original = r2_score(y_test_original, predictions_original)
+
+        # Sonuçların yazdırılması
+        print(f"{num_layers} Katmanlı Model için Sonuçlar:")
+        print("Scaled RMSE:", rmse_scaled)
+        print("Scaled MAE:", mae_scaled)
+        print("Scaled MAPE:", mape_scaled)
+        print("Original R2:", r2_original)
+
+        results_list.append({
+            "symbol": symbol,
+            "num_layers": num_layers,
+            "scaled_rmse": rmse_scaled,
+            "scaled_mae": mae_scaled,
+            "scaled_mape": mape_scaled,
+            "original_r2": r2_original
+        })
+
+        # Görselleştirme: Sadece ilgili sembol için tahmin ve gerçek değer karşılaştırması
+        plt.figure(figsize=(10, 6))
+        plt.plot(y_test_original, label='Gerçek Değerler')
+        plt.plot(predictions_original, label='Tahminler')
+        plt.title(f"{symbol} - {num_layers} Katmanlı LSTM: Gerçek ve Tahmin Edilen Değerler")
+        plt.xlabel("Zaman Adımı")
+        plt.ylabel("Close Fiyatı")
+        plt.legend()
+        plt.show()
+
+# Tüm modellerin eğitim sonuçlarını derli toplu şekilde liste olarak ekrana yazdırma
+print("\n*** Tüm Model Eğitim Sonuçları Listesi ***")
+for result in results_list:
+    print(result)
