@@ -13,7 +13,7 @@ import matplotlib.pyplot as plt
 
 
 
-# 1. Orijinal Veri Çekme, Temizleme ve Saklama İşlemleri
+# 1. Orijinal Veri Çekme, Temizleme ve Saklama İşlemleri (Veri Seti: günlük ohlcv verileridir)
 
 def get_stock_data(stock_symbols, start_date, end_date):
     data_dict = {}
