@@ -30,7 +30,7 @@ data = yf.download(symbols,
                    start=start_date,
                    end=end_date,
                    interval="1h",
-                   auto_adjust= False) #Adjusted Close setini kullanma opsiyonu
+                   auto_adjust= False) #Adjusted Close setini kullanmak için False
 # Saatlik Close trend görseli
 plt.figure(figsize=(12, 6))
 plt.plot(pd.to_datetime(data.index), data['Close'], marker='o', linestyle='-')
@@ -63,7 +63,7 @@ print(data.head())
 print("\nSon 5 kayıt:")
 print(data.tail())
 
-#Volume setini kullanma opsiyonu
+#Volume setini kullanmak için True
 use_volume = True
 
 # Özellikler ve hedef değişkenin belirlenmesi (hedef: 'Close')
